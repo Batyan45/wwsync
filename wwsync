@@ -1,0 +1,186 @@
+#!/usr/bin/env python3
+import os
+import sys
+import json
+import subprocess
+from pathlib import Path
+
+# Config path
+CONFIG_PATH = Path.home() / ".wwsync"
+
+class Colors:
+    HEADER = '\033[95m'
+    BLUE = '\033[94m'
+    GREEN = '\033[92m'
+    WARNING = '\033[93m'
+    FAIL = '\033[91m'
+    ENDC = '\033[0m'
+    BOLD = '\033[1m'
+
+def load_config():
+    if not CONFIG_PATH.exists():
+        # Create extended example if file doesn't exist
+        default_config = {
+            "servers": {
+                "example": {
+                    "host": "user@192.168.1.10",
+                    "mappings": [
+                        {
+                            "local": "/Users/user/projects/my-app",
+                            "remote": "/var/www/my-app",
+                            "excludes": [".git", "node_modules", "build", ".env", "*.log"]
+                        }
+                    ]
+                }
+            }
+        }
+        save_config(default_config)
+        return default_config
+    try:
+        with open(CONFIG_PATH, 'r') as f:
+            return json.load(f)
+    except json.JSONDecodeError:
+        print(f"{Colors.FAIL}Error: .wwsync file is corrupted (invalid JSON).{Colors.ENDC}")
+        sys.exit(1)
+
+def save_config(config):
+    with open(CONFIG_PATH, 'w') as f:
+        json.dump(config, f, indent=4)
+
+def run_rsync(host, local_path, remote_path, excludes, full_sync):
+    # Ensure local path ends with slash for rsync content copying
+    src = str(local_path)
+    if not src.endswith(os.sep):
+        src += os.sep
+    
+    # Base command
+    base_cmd = ["rsync", "-avzP"]
+    for exc in excludes:
+        base_cmd.extend(["--exclude", exc])
+    
+    # Paths
+    paths = [src, f"{host}:{remote_path}"]
+
+    if not full_sync:
+        # === SAFE MODE (No delete) ===
+        print(f"{Colors.HEADER}>>> Syncing (Safe Mode): {local_path} -> {host}:{remote_path}{Colors.ENDC}")
+        print(f"{Colors.BLUE}Files missing locally will NOT be deleted on the server.{Colors.ENDC}")
+        
+        cmd = base_cmd + paths
+        try:
+            subprocess.run(cmd, check=True)
+            print(f"{Colors.GREEN}✔ Sync completed successfully.{Colors.ENDC}")
+        except subprocess.CalledProcessError:
+            print(f"{Colors.FAIL}✖ Sync failed.{Colors.ENDC}")
+
+    else:
+        # === FULL SYNC (--full) ===
+        print(f"{Colors.HEADER}>>> Full Sync (Full Mode): {local_path} -> {host}:{remote_path}{Colors.ENDC}")
+        print(f"{Colors.WARNING}Checking for files to delete on remote...{Colors.ENDC}")
+
+        # 1. Dry Run to identify deletions
+        check_cmd = base_cmd + ["--delete", "--dry-run"] + paths
+        
+        try:
+            result = subprocess.run(check_cmd, capture_output=True, text=True)
+            
+            files_to_delete = []
+            for line in result.stdout.splitlines():
+                if line.strip().startswith("deleting "):
+                    files_to_delete.append(line.strip())
+
+            if files_to_delete:
+                print(f"\n{Colors.FAIL}{Colors.BOLD}WARNING! The following files will be DELETED on the server:{Colors.ENDC}")
+                for f in files_to_delete:
+                    print(f"  - {f}")
+                
+                print(f"\n{Colors.WARNING}Total files to delete: {len(files_to_delete)}{Colors.ENDC}")
+                confirm = input(f"Are you sure you want to continue? ({Colors.GREEN}y{Colors.ENDC}/{Colors.FAIL}n{Colors.ENDC}): ").strip().lower()
+                
+                if confirm != 'y':
+                    print(f"{Colors.FAIL}Operation cancelled.{Colors.ENDC}")
+                    return
+            else:
+                print(f"{Colors.GREEN}No files need to be deleted.{Colors.ENDC}")
+
+            # 2. Execute Real Command
+            real_cmd = base_cmd + ["--delete"] + paths
+            subprocess.run(real_cmd, check=True)
+            print(f"{Colors.GREEN}✔ Full sync completed.{Colors.ENDC}")
+
+        except subprocess.CalledProcessError as e:
+            print(f"{Colors.FAIL}Error executing rsync.{Colors.ENDC}")
+            print(e.stderr)
+
+def main():
+    # Parse args
+    args = sys.argv[1:]
+    full_sync = False
+    
+    if "--full" in args:
+        full_sync = True
+        args.remove("--full")
+
+    if len(args) < 1:
+        print(f"Usage: {Colors.BLUE}wwsync <server-alias> [--full]{Colors.ENDC}")
+        sys.exit(1)
+
+    server_alias = args[0]
+    config = load_config()
+    
+    # Normalize current directory to avoid "folder" vs "folder/" mismatch
+    current_dir_path = Path.cwd().resolve()
+
+    # 1. Check/Create Server Config
+    if server_alias not in config.get("servers", {}):
+        print(f"{Colors.WARNING}Server '{server_alias}' not found in config.{Colors.ENDC}")
+        host_address = input(f"Enter connection address (user@ip): ").strip()
+        if not host_address: sys.exit(1)
+        
+        if "servers" not in config: config["servers"] = {}
+        config["servers"][server_alias] = {"host": host_address, "mappings": []}
+        save_config(config)
+
+    server_config = config["servers"][server_alias]
+    host = server_config["host"]
+    mappings = server_config.get("mappings", [])
+
+    # 2. Find mapping for current directory
+    active_mapping = next(
+        (m for m in mappings if Path(m["local"]).resolve() == current_dir_path), 
+        None
+    )
+
+    # 3. Create mapping if not exists
+    if not active_mapping:
+        print(f"{Colors.WARNING}No sync configuration found for this folder on '{server_alias}'.{Colors.ENDC}")
+        remote_path = input(f"Enter remote destination path: ").strip()
+        if not remote_path: sys.exit(1)
+        
+        print("Enter exclusions separated by commas (e.g. .git, node_modules).")
+        print(f"{Colors.BLUE}Note: Excluded files are never deleted, even in --full mode.{Colors.ENDC}")
+        
+        excludes_input = input("Excludes [Enter to skip]: ").strip()
+        excludes = [e.strip() for e in excludes_input.split(',')] if excludes_input else []
+        
+        active_mapping = {
+            "local": str(current_dir_path),
+            "remote": remote_path,
+            "excludes": excludes
+        }
+        mappings.append(active_mapping)
+        config["servers"][server_alias]["mappings"] = mappings
+        save_config(config)
+        print(f"{Colors.GREEN}Configuration saved!{Colors.ENDC}")
+
+    # 4. Run
+    run_rsync(
+        host, 
+        active_mapping["local"], 
+        active_mapping["remote"], 
+        active_mapping["excludes"],
+        full_sync=full_sync
+    )
+
+if __name__ == "__main__":
+    main()
