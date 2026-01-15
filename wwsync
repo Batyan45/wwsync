@@ -3,6 +3,7 @@ import os
 import sys
 import json
 import subprocess
+import argparse
 from pathlib import Path
 
 # Config path
@@ -112,23 +113,40 @@ def run_rsync(host, local_path, remote_path, excludes, full_sync):
             print(f"{Colors.FAIL}Error executing rsync.{Colors.ENDC}")
             print(e.stderr)
 
-def main():
-    # Parse args
-    args = sys.argv[1:]
-    full_sync = False
+def run_remote_session(host, remote_path, shell_type="bash"):
+    print(f"\n{Colors.HEADER}>>> Starting Remote Session{Colors.ENDC}")
+    print(f"Server: {Colors.BLUE}{host}{Colors.ENDC}")
+    print(f"Path: {Colors.BLUE}{remote_path}{Colors.ENDC}")
     
-    if "--full" in args:
-        full_sync = True
-        args.remove("--full")
+    # Simply cd to the directory and start the shell
+    remote_cmd = f"cd {remote_path} && exec {shell_type}"
+    
+    try:
+        subprocess.run(["ssh", "-t", host, remote_cmd])
+    except subprocess.CalledProcessError:
+        print(f"{Colors.FAIL}Error establishing SSH session.{Colors.ENDC}")
 
-    if len(args) < 1:
-        print(f"Usage: {Colors.BLUE}wwsync <server-alias> [--full]{Colors.ENDC}")
+def main():
+    parser = argparse.ArgumentParser(description=f"{Colors.BOLD}WWSync - Super Simple Rsync Wrapper{Colors.ENDC}")
+    parser.add_argument("server_alias", nargs="?", help="Server alias from config")
+    parser.add_argument("-f", "--full", action="store_true", help="Full sync (deletes local-missing files on remote)")
+    parser.add_argument("-s", "--sync", action="store_true", help="Safe sync (upload only, no delete)")
+    parser.add_argument("-r", "--run", action="store_true", help="Run remote session after sync (if any)")
+    
+    args = parser.parse_args()
+
+    if not args.server_alias:
+        parser.print_help()
+        sys.exit(1)
+        
+    if not (args.sync or args.full or args.run):
+        parser.print_help()
+        print(f"\n{Colors.WARNING}Please specify an action: -s (sync), -f (full sync), or -r (run){Colors.ENDC}")
         sys.exit(1)
 
-    server_alias = args[0]
+    server_alias = args.server_alias
     config = load_config()
     
-    # Normalize current directory to avoid "folder" vs "folder/" mismatch
     current_dir_path = Path.cwd().resolve()
 
     # 1. Check/Create Server Config
@@ -143,6 +161,7 @@ def main():
 
     server_config = config["servers"][server_alias]
     host = server_config["host"]
+    shell_type = server_config.get("shell", "bash")
     mappings = server_config.get("mappings", [])
 
     # 2. Find mapping for current directory
@@ -153,6 +172,7 @@ def main():
 
     # 3. Create mapping if not exists
     if not active_mapping:
+
         print(f"{Colors.WARNING}No sync configuration found for this folder on '{server_alias}'.{Colors.ENDC}")
         remote_path = input(f"Enter remote destination path: ").strip()
         if not remote_path: sys.exit(1)
@@ -173,14 +193,24 @@ def main():
         save_config(config)
         print(f"{Colors.GREEN}Configuration saved!{Colors.ENDC}")
 
-    # 4. Run
-    run_rsync(
-        host, 
-        active_mapping["local"], 
-        active_mapping["remote"], 
-        active_mapping["excludes"],
-        full_sync=full_sync
-    )
+    # 4. Execute Actions
+    # Sync first if requested
+    if args.sync or args.full:
+        run_rsync(
+            host, 
+            active_mapping["local"], 
+            active_mapping["remote"], 
+            active_mapping["excludes"],
+            full_sync=args.full
+        )
+    
+    # Run second if requested
+    if args.run:
+        run_remote_session(
+            host,
+            active_mapping["remote"],
+            shell_type=shell_type
+        )
 
 if __name__ == "__main__":
     main()

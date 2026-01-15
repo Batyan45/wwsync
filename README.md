@@ -4,10 +4,11 @@ A simple, interactive wrapper around `rsync` designed for developers who code lo
 
 ## Features
 
-- **Zero-Config Start:** Just run `wwsync <server>` in your project folder. It will ask for details once and remember them.
+- **Zero-Config Start:** Just run `wwsync <server> -s` in your project folder. It will ask for details once and remember them.
 - **Multiple Servers:** Support for distinct configurations (e.g., `production`, `staging`, `dev-server`).
-- **Safe Mode by Default:** Standard execution uploads files but **never deletes** anything on the server (preserving logs, build artifacts, etc.).
-- **Interactive Full Sync:** The `--full` flag mirrors the local directory. It performs a "dry run" first, shows you exactly which files will be deleted, and asks for confirmation.
+- **Safe Mode (`-s`):** Standard execution uploads files but **never deletes** anything on the server (preserving logs, build artifacts, etc.).
+- **Interactive Full Sync (`-f`):** The `-f` flag mirrors the local directory. It performs a "dry run" first, shows you exactly which files will be deleted, and asks for confirmation.
+- **Remote Run (`-r`):** Automatically SSH into the server, cd to the project folder, and optionally execute a startup command (e.g. `conda activate`).
 - **Exclusions:** Easy management of ignored files (`node_modules`, `.git`, `.env`).
 
 ## Installation
@@ -38,7 +39,7 @@ sudo mv wwsync /usr/local/bin/
 Run this command inside your project folder:
 
 ```bash
-wwsync my-server
+wwsync my-server -s
 ```
 
 * If this is your first time, it will ask for the `user@ip` and the `remote path`.
@@ -50,12 +51,31 @@ wwsync my-server
 If you renamed files or cleaned up your local folder and want the server to match exactly:
 
 ```bash
-wwsync my-server --full
+wwsync my-server -f
 ```
 
 * It calculates differences.
 * It displays a list of files to be deleted (e.g., `deleting logs/old.log`).
 * It asks for `y/n` confirmation before deleting anything.
+
+### 3. Remote Run
+
+To jump into the remote server directory (and optionally run a command):
+
+```bash
+wwsync my-server -r
+```
+
+* Connects via SSH and `cd`s to the configured remote path.
+* If a `run_command` is configured (e.g. `source .env`), it executes it first.
+* Leaves you in an interactive shell.
+
+**Combine with sync:**
+```bash
+wwsync my-server -s -r
+```
+1. Syncs files (Safe mode).
+2. Starts remote session.
 
 ## Configuration
 
@@ -68,11 +88,13 @@ The configuration is stored in `~/.wwsync` in JSON format. You can edit it manua
     "servers": {
         "production": {
             "host": "root@192.168.1.50",
+            "shell": "zsh",
             "mappings": [
                 {
                     "local": "/Users/dev/my-project",
                     "remote": "/var/www/html/api",
-                    "excludes": [".git", "node_modules", ".env"]
+                    "excludes": [".git", "node_modules", ".env"],
+                    "run_command": "source .env; conda activate myenv"
                 }
             ]
         }
@@ -84,3 +106,4 @@ The configuration is stored in `~/.wwsync` in JSON format. You can edit it manua
 
 * Python 3+
 * `rsync` installed on both local machine and remote server.
+* SSH access to the remote server.
