@@ -135,9 +135,32 @@ def main():
     
     args = parser.parse_args()
 
+    config = load_config()
+    current_dir_path = Path.cwd().resolve()
+
     if not args.server_alias:
-        parser.print_help()
-        sys.exit(1)
+        if args.sync or args.full or args.run:
+            matches = []
+            for name, data in config.get("servers", {}).items():
+                for m in data.get("mappings", []):
+                    if Path(m["local"]).resolve() == current_dir_path:
+                        matches.append(name)
+                        break
+            
+            if len(matches) == 0:
+                print(f"{Colors.FAIL}No configured server found for current directory.{Colors.ENDC}")
+                sys.exit(0)
+            elif len(matches) == 1:
+                print(f"{Colors.HEADER}Auto-detected server: {Colors.BLUE}{matches[0]}{Colors.ENDC}")
+                args.server_alias = matches[0]
+            else:
+                print(f"{Colors.WARNING}Multiple servers found for current directory:{Colors.ENDC}")
+                for m in matches:
+                    print(f" - {m}")
+                sys.exit(0)
+        else:
+            parser.print_help()
+            sys.exit(0)
         
     if not (args.sync or args.full or args.run):
         parser.print_help()
@@ -145,9 +168,6 @@ def main():
         sys.exit(1)
 
     server_alias = args.server_alias
-    config = load_config()
-    
-    current_dir_path = Path.cwd().resolve()
 
     # 1. Check/Create Server Config
     if server_alias not in config.get("servers", {}):
