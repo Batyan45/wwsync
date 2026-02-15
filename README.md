@@ -6,8 +6,10 @@ A simple, interactive wrapper around `rsync` designed for developers who code lo
 
 - **Zero-Config Start:** Just run `wwsync <server> -s` in your project folder. It will ask for details once and remember them.
 - **Multiple Servers:** Support for distinct configurations (e.g., `production`, `staging`, `dev-server`).
-- **Safe Mode (`-s`):** Standard execution uploads files but **never deletes** anything on the server (preserving logs, build artifacts, etc.).
-- **Interactive Full Sync (`-f`):** The `-f` flag mirrors the local directory. It performs a "dry run" first, shows you exactly which files will be deleted, and asks for confirmation.
+- **Safe Mode (`-s` / `--safe`):** Standard execution uploads files but **never deletes** anything on the server (preserving logs, build artifacts, etc.).
+- **Interactive Full Sync (`-f` / `--full`):** The `-f` flag mirrors the local directory. It performs a "dry run" first, shows you exactly which files will be deleted, and asks for confirmation.
+- **Sync All (`-a` / `--all`):** Syncs all mappings across all servers in one command. Requires `--safe` or `--full`. Asks for confirmation before each mapping.
+- **Auto Accept (`--auto_accept`):** Skips all confirmations in `--full` and `--all` modes.
 - **Remote Run (`-r`):** Automatically SSH into the server, cd to the project folder, and optionally execute a startup command (e.g. `conda activate`).
 - **Exclusions:** Easy management of ignored files (`node_modules`, `.git`, `.env`).
 
@@ -15,7 +17,7 @@ A simple, interactive wrapper around `rsync` designed for developers who code lo
 
 1. Download the script:
 ```bash
-curl -o wwsync https://raw.githubusercontent.com/Batyan45/wwsync/refs/heads/main/wwsync
+curl -o wwsync -L https://github.com/Batyan45/wwsync/releases/latest/download/wwsync
 # OR just copy the python code into a file named 'wwsync'
 ```
 
@@ -73,6 +75,21 @@ wwsync my-server -r
 **Combine with sync:**
 ```bash
 wwsync my-server -s -r
+```
+
+### 4. Sync All Mappings
+
+To sync all configured mappings across all servers:
+
+```bash
+# Safe sync all
+wwsync -a -s
+
+# Full sync all (with confirmations)
+wwsync -a -f
+
+# Full sync all without confirmations
+wwsync -a -f --auto_accept
 ```
 1. Syncs files (Safe mode).
 2. Starts remote session.

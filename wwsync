@@ -48,7 +48,7 @@ def save_config(config):
     with open(CONFIG_PATH, 'w') as f:
         json.dump(config, f, indent=4)
 
-def run_rsync(host, local_path, remote_path, excludes, full_sync):
+def run_rsync(host, local_path, remote_path, excludes, full_sync, auto_accept=False):
     # Ensure local path ends with slash for rsync content copying
     src = str(local_path)
     if not src.endswith(os.sep):
@@ -80,7 +80,7 @@ def run_rsync(host, local_path, remote_path, excludes, full_sync):
         print(f"{Colors.WARNING}Checking for files to delete on remote...{Colors.ENDC}")
 
         # 1. Dry Run to identify deletions
-        check_cmd = base_cmd + ["--delete", "--dry-run"] + paths
+        check_cmd = base_cmd + ["--delete", "--force", "--dry-run"] + paths
         
         try:
             result = subprocess.run(check_cmd, capture_output=True, text=True)
@@ -96,16 +96,20 @@ def run_rsync(host, local_path, remote_path, excludes, full_sync):
                     print(f"  - {f}")
                 
                 print(f"\n{Colors.WARNING}Total files to delete: {len(files_to_delete)}{Colors.ENDC}")
-                confirm = input(f"Are you sure you want to continue? ({Colors.GREEN}y{Colors.ENDC}/{Colors.FAIL}n{Colors.ENDC}): ").strip().lower()
                 
-                if confirm != 'y':
-                    print(f"{Colors.FAIL}Operation cancelled.{Colors.ENDC}")
-                    return
+                if auto_accept:
+                    print(f"{Colors.GREEN}Auto-accepting deletion.{Colors.ENDC}")
+                else:
+                    confirm = input(f"Are you sure you want to continue? ({Colors.GREEN}y{Colors.ENDC}/{Colors.FAIL}n{Colors.ENDC}): ").strip().lower()
+                    
+                    if confirm != 'y':
+                        print(f"{Colors.FAIL}Operation cancelled.{Colors.ENDC}")
+                        return
             else:
                 print(f"{Colors.GREEN}No files need to be deleted.{Colors.ENDC}")
 
             # 2. Execute Real Command
-            real_cmd = base_cmd + ["--delete"] + paths
+            real_cmd = base_cmd + ["--delete", "--force"] + paths
             subprocess.run(real_cmd, check=True)
             print(f"{Colors.GREEN}✔ Full sync completed.{Colors.ENDC}")
 
@@ -130,16 +134,53 @@ def main():
     parser = argparse.ArgumentParser(description=f"{Colors.BOLD}WWSync - Super Simple Rsync Wrapper{Colors.ENDC}")
     parser.add_argument("server_alias", nargs="?", help="Server alias from config")
     parser.add_argument("-f", "--full", action="store_true", help="Full sync (deletes local-missing files on remote)")
-    parser.add_argument("-s", "--sync", action="store_true", help="Safe sync (upload only, no delete)")
+    parser.add_argument("-s", "--safe", action="store_true", help="Safe sync (upload only, no delete)")
     parser.add_argument("-r", "--run", action="store_true", help="Run remote session after sync (if any)")
+    parser.add_argument("-a", "--all", action="store_true", help="Sync all mappings for the specified server")
+    parser.add_argument("--auto_accept", action="store_true", help="Auto-accept all confirmations")
     
     args = parser.parse_args()
 
     config = load_config()
     current_dir_path = Path.cwd().resolve()
 
+    # --all mode: sync all mappings for a specific server
+    if args.all:
+        if not (args.safe or args.full):
+            print(f"{Colors.FAIL}--all requires --safe or --full flag.{Colors.ENDC}")
+            sys.exit(1)
+        if not args.server_alias:
+            print(f"{Colors.FAIL}--all requires a server alias.{Colors.ENDC}")
+            sys.exit(1)
+        
+        server_alias = args.server_alias
+        if server_alias not in config.get("servers", {}):
+            print(f"{Colors.FAIL}Server '{server_alias}' not found in config.{Colors.ENDC}")
+            sys.exit(1)
+        
+        server_data = config["servers"][server_alias]
+        host = server_data["host"]
+        for mapping in server_data.get("mappings", []):
+            local = mapping["local"]
+            remote = mapping["remote"]
+            excludes = mapping.get("excludes", [])
+            mode_name = "Full" if args.full else "Safe"
+            
+            print(f"\n{Colors.HEADER}[{server_alias}] {mode_name}: {local} -> {host}:{remote}{Colors.ENDC}")
+            
+            if not args.auto_accept:
+                confirm = input(f"Are you sure you want to continue? ({Colors.GREEN}y{Colors.ENDC}/{Colors.FAIL}n{Colors.ENDC}): ").strip().lower()
+                if confirm != 'y':
+                    print(f"{Colors.WARNING}Skipped.{Colors.ENDC}")
+                    continue
+            
+            run_rsync(host, local, remote, excludes, full_sync=args.full, auto_accept=args.auto_accept)
+        
+        print(f"\n{Colors.GREEN}{Colors.BOLD}All mappings processed.{Colors.ENDC}")
+        sys.exit(0)
+
     if not args.server_alias:
-        if args.sync or args.full or args.run:
+        if args.safe or args.full or args.run:
             matches = []
             for name, data in config.get("servers", {}).items():
                 for m in data.get("mappings", []):
@@ -162,9 +203,9 @@ def main():
             parser.print_help()
             sys.exit(0)
         
-    if not (args.sync or args.full or args.run):
+    if not (args.safe or args.full or args.run):
         parser.print_help()
-        print(f"\n{Colors.WARNING}Please specify an action: -s (sync), -f (full sync), or -r (run){Colors.ENDC}")
+        print(f"\n{Colors.WARNING}Please specify an action: -s (safe sync), -f (full sync), or -r (run){Colors.ENDC}")
         sys.exit(1)
 
     server_alias = args.server_alias
@@ -215,13 +256,14 @@ def main():
 
     # 4. Execute Actions
     # Sync first if requested
-    if args.sync or args.full:
+    if args.safe or args.full:
         run_rsync(
             host, 
             active_mapping["local"], 
             active_mapping["remote"], 
             active_mapping["excludes"],
-            full_sync=args.full
+            full_sync=args.full,
+            auto_accept=args.auto_accept
         )
     
     # Run second if requested
