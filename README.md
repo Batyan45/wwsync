@@ -12,6 +12,7 @@ A simple, interactive wrapper around `rsync` designed for developers who code lo
 - **Auto Accept (`--auto_accept`):** Skips all confirmations in `--full` and `--all` modes.
 - **Remote Run (`-r`):** Automatically SSH into the server, cd to the project folder, and optionally execute a startup command (e.g. `conda activate`).
 - **Exclusions:** Easy management of ignored files (`node_modules`, `.git`, `.env`).
+- **Artifacts Download (`-d` / `--download`):** Downloads only **new remote files** into `.wwsync_<server>_artifacts` inside your project. Changed files are listed as warning and are not downloaded.
 
 ## Installation
 
@@ -94,6 +95,17 @@ wwsync -a -f --auto_accept
 1. Syncs files (Safe mode).
 2. Starts remote session.
 
+### 5. Download Remote Artifacts
+
+```bash
+wwsync my-server -d
+```
+
+* Creates/overwrites `.wwsync_my-server_artifacts` in your project directory.
+* Downloads only files that are new on remote.
+* If remote also has changed files, prints a warning list and skips those files.
+* If the artifacts folder already exists, asks for confirmation before deleting it.
+
 ## Configuration
 
 The configuration is stored in `~/.wwsync` in JSON format. You can edit it manually if needed.
@@ -111,6 +123,7 @@ The configuration is stored in `~/.wwsync` in JSON format. You can edit it manua
                     "local": "/Users/dev/my-project",
                     "remote": "/var/www/html/api",
                     "excludes": [".git", "node_modules", ".env"],
+                    "artifact_excludes": ["*.tmp", "*.cache", ".DS_Store"],
                     "run_command": "source .env; conda activate myenv"
                 }
             ]

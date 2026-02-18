@@ -2,8 +2,10 @@
 import os
 import sys
 import json
+import shutil
 import subprocess
 import argparse
+import tempfile
 from pathlib import Path
 
 # Config path
@@ -29,7 +31,8 @@ def load_config():
                         {
                             "local": "/Users/user/projects/my-app",
                             "remote": "/var/www/my-app",
-                            "excludes": [".git", "node_modules", "build", ".env", "*.log"]
+                            "excludes": [".git", "node_modules", "build", ".env", "*.log"],
+                            "artifact_excludes": ["*.tmp", "*.cache", ".DS_Store"]
                         }
                     ]
                 }
@@ -130,12 +133,138 @@ def run_remote_session(host, remote_path, shell_type="bash"):
     except subprocess.CalledProcessError:
         print(f"{Colors.FAIL}Error establishing SSH session.{Colors.ENDC}")
 
+def _ensure_trailing_slash(path):
+    return path if path.endswith("/") else f"{path}/"
+
+def _parse_rsync_itemized_output(output):
+    new_files = []
+    changed_files = []
+
+    for line in output.splitlines():
+        if "\t" not in line:
+            continue
+
+        item_code, rel_path = line.split("\t", 1)
+        item_code = item_code.strip()
+        rel_path = rel_path.strip()
+
+        if not rel_path:
+            continue
+
+        # We only care about regular files coming from remote -> local.
+        if not item_code.startswith(">f"):
+            continue
+
+        if item_code == ">f+++++++++":
+            new_files.append(rel_path)
+        else:
+            changed_files.append(rel_path)
+
+    # Preserve order, remove duplicates.
+    new_files = list(dict.fromkeys(new_files))
+    changed_files = list(dict.fromkeys(changed_files))
+    return new_files, changed_files
+
+def _collect_remote_file_diff(host, local_path, remote_path, excludes):
+    src_remote = f"{host}:{_ensure_trailing_slash(remote_path)}"
+    local_dst = _ensure_trailing_slash(str(local_path))
+
+    cmd = [
+        "rsync",
+        "-az",
+        "--dry-run",
+        "--itemize-changes",
+        "--out-format=%i\t%n"
+    ]
+
+    for exc in excludes:
+        cmd.extend(["--exclude", exc])
+
+    cmd.extend([src_remote, local_dst])
+
+    result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+    return _parse_rsync_itemized_output(result.stdout)
+
+def _reset_artifacts_dir(artifacts_dir, auto_accept=False):
+    if artifacts_dir.exists():
+        if auto_accept:
+            print(f"{Colors.GREEN}Auto-accepting artifacts directory overwrite.{Colors.ENDC}")
+        else:
+            confirm = input(
+                f"Artifacts directory '{artifacts_dir.name}' already exists. "
+                f"Delete and recreate? ({Colors.GREEN}y{Colors.ENDC}/{Colors.FAIL}n{Colors.ENDC}): "
+            ).strip().lower()
+            if confirm != "y":
+                print(f"{Colors.FAIL}Operation cancelled.{Colors.ENDC}")
+                return False
+
+        shutil.rmtree(artifacts_dir)
+
+    artifacts_dir.mkdir(parents=True, exist_ok=True)
+    return True
+
+def download_remote_artifacts(server_alias, host, local_path, remote_path, excludes, artifact_excludes=None, auto_accept=False):
+    artifact_excludes = artifact_excludes or []
+    all_excludes = list(dict.fromkeys((excludes or []) + artifact_excludes))
+
+    local_root = Path(local_path).resolve()
+    artifacts_dir = local_root / f".wwsync_{server_alias}_artifacts"
+
+    print(f"{Colors.HEADER}>>> Collecting remote artifacts: {host}:{remote_path}{Colors.ENDC}")
+
+    try:
+        new_files, changed_files = _collect_remote_file_diff(
+            host=host,
+            local_path=local_root,
+            remote_path=remote_path,
+            excludes=all_excludes
+        )
+    except subprocess.CalledProcessError:
+        print(f"{Colors.FAIL}Failed to collect remote diff via rsync dry-run.{Colors.ENDC}")
+        return
+
+    if changed_files:
+        print(f"\n{Colors.WARNING}{Colors.BOLD}Warning: changed files detected on remote (won't be downloaded):{Colors.ENDC}")
+        for path in changed_files:
+            print(f"  - {path}")
+
+    if not _reset_artifacts_dir(artifacts_dir, auto_accept=auto_accept):
+        return
+
+    if not new_files:
+        print(f"{Colors.GREEN}No new remote files found. Artifacts directory is empty.{Colors.ENDC}")
+        return
+
+    temp_file_path = None
+    try:
+        with tempfile.NamedTemporaryFile("w", delete=False) as temp_file:
+            for rel_path in new_files:
+                temp_file.write(f"{rel_path}\n")
+            temp_file_path = temp_file.name
+
+        cmd = [
+            "rsync",
+            "-azP",
+            "--files-from", temp_file_path,
+            f"{host}:{_ensure_trailing_slash(remote_path)}",
+            _ensure_trailing_slash(str(artifacts_dir))
+        ]
+
+        subprocess.run(cmd, check=True)
+        print(f"{Colors.GREEN}✔ Downloaded {len(new_files)} new remote file(s) into {artifacts_dir.name}.{Colors.ENDC}")
+    except subprocess.CalledProcessError:
+        print(f"{Colors.FAIL}Failed to download remote artifacts.{Colors.ENDC}")
+    finally:
+        if temp_file_path and os.path.exists(temp_file_path):
+            os.remove(temp_file_path)
+
 def main():
     parser = argparse.ArgumentParser(description=f"{Colors.BOLD}WWSync - Super Simple Rsync Wrapper{Colors.ENDC}")
     parser.add_argument("server_alias", nargs="?", help="Server alias from config")
     parser.add_argument("-f", "--full", action="store_true", help="Full sync (deletes local-missing files on remote)")
     parser.add_argument("-s", "--safe", action="store_true", help="Safe sync (upload only, no delete)")
     parser.add_argument("-r", "--run", action="store_true", help="Run remote session after sync (if any)")
+    parser.add_argument("-d", "--download", action="store_true", help="Download only new remote files into .wwsync_{server}_artifacts")
     parser.add_argument("-a", "--all", action="store_true", help="Sync all mappings for the specified server")
     parser.add_argument("--auto_accept", action="store_true", help="Auto-accept all confirmations")
     
@@ -146,6 +275,9 @@ def main():
 
     # --all mode: sync all mappings for a specific server
     if args.all:
+        if args.download:
+            print(f"{Colors.FAIL}--all cannot be combined with --download.{Colors.ENDC}")
+            sys.exit(1)
         if not (args.safe or args.full):
             print(f"{Colors.FAIL}--all requires --safe or --full flag.{Colors.ENDC}")
             sys.exit(1)
@@ -180,7 +312,7 @@ def main():
         sys.exit(0)
 
     if not args.server_alias:
-        if args.safe or args.full or args.run:
+        if args.safe or args.full or args.run or args.download:
             matches = []
             for name, data in config.get("servers", {}).items():
                 for m in data.get("mappings", []):
@@ -203,9 +335,9 @@ def main():
             parser.print_help()
             sys.exit(0)
         
-    if not (args.safe or args.full or args.run):
+    if not (args.safe or args.full or args.run or args.download):
         parser.print_help()
-        print(f"\n{Colors.WARNING}Please specify an action: -s (safe sync), -f (full sync), or -r (run){Colors.ENDC}")
+        print(f"\n{Colors.WARNING}Please specify an action: -s (safe sync), -f (full sync), -d (download), or -r (run){Colors.ENDC}")
         sys.exit(1)
 
     server_alias = args.server_alias
@@ -247,7 +379,8 @@ def main():
         active_mapping = {
             "local": str(current_dir_path),
             "remote": remote_path,
-            "excludes": excludes
+            "excludes": excludes,
+            "artifact_excludes": []
         }
         mappings.append(active_mapping)
         config["servers"][server_alias]["mappings"] = mappings
@@ -263,6 +396,17 @@ def main():
             active_mapping["remote"], 
             active_mapping["excludes"],
             full_sync=args.full,
+            auto_accept=args.auto_accept
+        )
+
+    if args.download:
+        download_remote_artifacts(
+            server_alias=server_alias,
+            host=host,
+            local_path=active_mapping["local"],
+            remote_path=active_mapping["remote"],
+            excludes=active_mapping.get("excludes", []),
+            artifact_excludes=active_mapping.get("artifact_excludes", []),
             auto_accept=args.auto_accept
         )
     
