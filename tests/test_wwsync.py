@@ -19,6 +19,7 @@ class TestWWSync(unittest.TestCase):
     
     def setUp(self):
         self.mock_config = {
+            "general_excludes": [".git", ".DS_Store"],
             "servers": {
                 "test_server": {
                     "host": "user@test_host",
@@ -26,7 +27,7 @@ class TestWWSync(unittest.TestCase):
                         {
                             "local": "/local/path",
                             "remote": "/remote/path",
-                            "excludes": [".git"],
+                            "excludes": ["node_modules"],
                             "artifact_excludes": ["*.tmp"]
                         }
                     ]
@@ -42,6 +43,8 @@ class TestWWSync(unittest.TestCase):
                 with patch('json.dump') as mock_json_dump:
                     config = wwsync.load_config()
                     self.assertIn("servers", config)
+                    self.assertIn("general_excludes", config)
+                    self.assertIsInstance(config["general_excludes"], list)
                     mock_json_dump.assert_called_once()
 
     @patch('wwsync.CONFIG_PATH', Path("/tmp/.wwsync"))
@@ -92,13 +95,20 @@ class TestWWSync(unittest.TestCase):
         with patch('builtins.input', return_value='y'): # User says yes
             wwsync.run_rsync("user@host", "/local", "/remote", [], full_sync=True)
             
-            # Should be called twice: dry-run and real run
-            self.assertEqual(mock_run.call_count, 2)
+            # Should be called 3 times: dry-run, SSH rm+mkdir, rsync upload
+            self.assertEqual(mock_run.call_count, 3)
             
-            # check real run args
-            real_run_args = mock_run.call_args_list[1][0][0]
-            self.assertIn("--delete", real_run_args)
-            self.assertNotIn("--dry-run", real_run_args)
+            # Check SSH recreate command
+            ssh_args = mock_run.call_args_list[1][0][0]
+            self.assertEqual(ssh_args[0], "ssh")
+            self.assertEqual(ssh_args[1], "user@host")
+            self.assertIn("rm -rf", ssh_args[2])
+            self.assertIn("mkdir -p", ssh_args[2])
+            
+            # Check fresh upload (no --delete)
+            upload_args = mock_run.call_args_list[2][0][0]
+            self.assertNotIn("--delete", upload_args)
+            self.assertNotIn("--dry-run", upload_args)
 
     @patch('subprocess.run')
     def test_run_rsync_full_auto_accept(self, mock_run):
@@ -109,7 +119,8 @@ class TestWWSync(unittest.TestCase):
             wwsync.run_rsync("user@host", "/local", "/remote", [], full_sync=True, auto_accept=True)
             mock_input.assert_not_called()
         
-        self.assertEqual(mock_run.call_count, 2)
+        # 3 calls: dry-run, SSH rm+mkdir, rsync upload
+        self.assertEqual(mock_run.call_count, 3)
 
 
     @patch('subprocess.run')
@@ -211,6 +222,84 @@ class TestWWSync(unittest.TestCase):
             # Only dry-run should execute because overwrite was rejected.
             self.assertEqual(mock_run.call_count, 1)
             self.assertTrue(old_file.exists())
+
+class TestMergeExcludes(unittest.TestCase):
+
+    def test_merge_empty(self):
+        result = wwsync.merge_excludes([], [])
+        self.assertEqual(result, [])
+
+    def test_merge_general_only(self):
+        result = wwsync.merge_excludes([".git", ".DS_Store"], [])
+        self.assertEqual(result, [".git", ".DS_Store"])
+
+    def test_merge_mapping_only(self):
+        result = wwsync.merge_excludes([], ["node_modules", "build"])
+        self.assertEqual(result, ["node_modules", "build"])
+
+    def test_merge_deduplication(self):
+        result = wwsync.merge_excludes([".git", ".DS_Store"], [".git", "node_modules"])
+        self.assertEqual(result, [".git", ".DS_Store", "node_modules"])
+
+    def test_merge_preserves_order(self):
+        result = wwsync.merge_excludes(["a", "b"], ["c", "a", "d"])
+        self.assertEqual(result, ["a", "b", "c", "d"])
+
+    def test_merge_none_inputs(self):
+        self.assertEqual(wwsync.merge_excludes(None, ["x"]), ["x"])
+        self.assertEqual(wwsync.merge_excludes(["x"], None), ["x"])
+        self.assertEqual(wwsync.merge_excludes(None, None), [])
+
+    def test_general_excludes_missing_from_config(self):
+        config = {"servers": {}}
+        result = config.get("general_excludes", [])
+        self.assertEqual(result, [])
+
+class TestNoExcludesFlag(unittest.TestCase):
+    """Tests for the --no-excludes / -n flag."""
+
+    @patch('subprocess.run')
+    def test_safe_sync_no_excludes(self, mock_run):
+        """--no-excludes should produce an rsync command with zero --exclude flags."""
+        wwsync.run_rsync("user@host", "/local", "/remote", [], full_sync=False)
+        call_args = mock_run.call_args[0][0]
+        self.assertNotIn("--exclude", call_args)
+
+    @patch('subprocess.run')
+    def test_safe_sync_with_excludes(self, mock_run):
+        """Without --no-excludes, excludes should be present."""
+        wwsync.run_rsync("user@host", "/local", "/remote", [".git", "node_modules"], full_sync=False)
+        call_args = mock_run.call_args[0][0]
+        self.assertIn("--exclude", call_args)
+        self.assertIn(".git", call_args)
+        self.assertIn("node_modules", call_args)
+
+    def test_effective_excludes_empty_when_flag_set(self):
+        """Simulates the logic in main() — when no_excludes is True, effective_excludes must be []."""
+        general_excludes = [".git", ".DS_Store"]
+        mapping_excludes = ["node_modules", "build"]
+        no_excludes = True
+
+        effective = [] if no_excludes else wwsync.merge_excludes(general_excludes, mapping_excludes)
+        self.assertEqual(effective, [])
+
+    def test_effective_excludes_populated_when_flag_not_set(self):
+        """When no_excludes is False, effective_excludes should contain merged results."""
+        general_excludes = [".git", ".DS_Store"]
+        mapping_excludes = ["node_modules", "build"]
+        no_excludes = False
+
+        effective = [] if no_excludes else wwsync.merge_excludes(general_excludes, mapping_excludes)
+        self.assertEqual(effective, [".git", ".DS_Store", "node_modules", "build"])
+
+    def test_artifact_excludes_cleared_when_flag_set(self):
+        """artifact_excludes should also be empty when --no-excludes is active."""
+        mapping = {"artifact_excludes": ["*.tmp", "*.cache"]}
+        no_excludes = True
+
+        artifact_excludes = [] if no_excludes else mapping.get("artifact_excludes", [])
+        self.assertEqual(artifact_excludes, [])
+
 
 if __name__ == '__main__':
     unittest.main()

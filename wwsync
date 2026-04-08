@@ -20,10 +20,16 @@ class Colors:
     ENDC = '\033[0m'
     BOLD = '\033[1m'
 
+def merge_excludes(general_excludes, mapping_excludes):
+    """Merge general_excludes with per-mapping excludes, preserving order and removing duplicates."""
+    combined = list(general_excludes or []) + list(mapping_excludes or [])
+    return list(dict.fromkeys(combined))
+
 def load_config():
     if not CONFIG_PATH.exists():
         # Create extended example if file doesn't exist
         default_config = {
+            "general_excludes": [".git", ".DS_Store", "__pycache__"],
             "servers": {
                 "example": {
                     "host": "user@192.168.1.10",
@@ -31,8 +37,8 @@ def load_config():
                         {
                             "local": "/Users/user/projects/my-app",
                             "remote": "/var/www/my-app",
-                            "excludes": [".git", "node_modules", "build", ".env", "*.log"],
-                            "artifact_excludes": ["*.tmp", "*.cache", ".DS_Store"]
+                            "excludes": ["node_modules", "build", ".env", "*.log"],
+                            "artifact_excludes": ["*.tmp", "*.cache"]
                         }
                     ]
                 }
@@ -79,6 +85,7 @@ def run_rsync(host, local_path, remote_path, excludes, full_sync, auto_accept=Fa
 
     else:
         # === FULL SYNC (--full) ===
+        # Completely recreates the remote folder with local content.
         print(f"{Colors.HEADER}>>> Full Sync (Full Mode): {local_path} -> {host}:{remote_path}{Colors.ENDC}")
         print(f"{Colors.WARNING}Checking for files to delete on remote...{Colors.ENDC}")
 
@@ -99,26 +106,33 @@ def run_rsync(host, local_path, remote_path, excludes, full_sync, auto_accept=Fa
                     print(f"  - {f}")
                 
                 print(f"\n{Colors.WARNING}Total files to delete: {len(files_to_delete)}{Colors.ENDC}")
-                
-                if auto_accept:
-                    print(f"{Colors.GREEN}Auto-accepting deletion.{Colors.ENDC}")
-                else:
-                    confirm = input(f"Are you sure you want to continue? ({Colors.GREEN}y{Colors.ENDC}/{Colors.FAIL}n{Colors.ENDC}): ").strip().lower()
-                    
-                    if confirm != 'y':
-                        print(f"{Colors.FAIL}Operation cancelled.{Colors.ENDC}")
-                        return
-            else:
-                print(f"{Colors.GREEN}No files need to be deleted.{Colors.ENDC}")
 
-            # 2. Execute Real Command
-            real_cmd = base_cmd + ["--delete", "--force"] + paths
-            subprocess.run(real_cmd, check=True)
-            print(f"{Colors.GREEN}✔ Full sync completed.{Colors.ENDC}")
+            print(f"\n{Colors.WARNING}{Colors.BOLD}The remote folder will be completely recreated.{Colors.ENDC}")
+
+            if auto_accept:
+                print(f"{Colors.GREEN}Auto-accepting full sync.{Colors.ENDC}")
+            else:
+                confirm = input(f"Are you sure you want to continue? ({Colors.GREEN}y{Colors.ENDC}/{Colors.FAIL}n{Colors.ENDC}): ").strip().lower()
+                
+                if confirm != 'y':
+                    print(f"{Colors.FAIL}Operation cancelled.{Colors.ENDC}")
+                    return
+
+            # 2. Recreate remote directory (rm -rf contents, then mkdir -p)
+            print(f"{Colors.WARNING}Recreating remote directory...{Colors.ENDC}")
+            recreate_cmd = f"rm -rf {remote_path} && mkdir -p {remote_path}"
+            subprocess.run(["ssh", host, recreate_cmd], check=True)
+
+            # 3. Upload all content fresh
+            print(f"{Colors.HEADER}Uploading all files...{Colors.ENDC}")
+            upload_cmd = base_cmd + paths
+            subprocess.run(upload_cmd, check=True)
+            print(f"{Colors.GREEN}✔ Full sync completed (remote folder recreated).{Colors.ENDC}")
 
         except subprocess.CalledProcessError as e:
-            print(f"{Colors.FAIL}Error executing rsync.{Colors.ENDC}")
-            print(e.stderr)
+            print(f"{Colors.FAIL}Error executing full sync.{Colors.ENDC}")
+            if hasattr(e, 'stderr') and e.stderr:
+                print(e.stderr)
 
 def run_remote_session(host, remote_path, shell_type="bash"):
     print(f"\n{Colors.HEADER}>>> Starting Remote Session{Colors.ENDC}")
@@ -267,6 +281,7 @@ def main():
     parser.add_argument("-d", "--download", action="store_true", help="Download only new remote files into .wwsync_{server}_artifacts")
     parser.add_argument("-a", "--all", action="store_true", help="Sync all mappings for the specified server")
     parser.add_argument("--auto_accept", action="store_true", help="Auto-accept all confirmations")
+    parser.add_argument("-n", "--no-excludes", action="store_true", help="Ignore all excludes (general, per-mapping, artifact)")
     
     args = parser.parse_args()
 
@@ -292,10 +307,11 @@ def main():
         
         server_data = config["servers"][server_alias]
         host = server_data["host"]
+        general_excludes = config.get("general_excludes", [])
         for mapping in server_data.get("mappings", []):
             local = mapping["local"]
             remote = mapping["remote"]
-            excludes = mapping.get("excludes", [])
+            excludes = [] if args.no_excludes else merge_excludes(general_excludes, mapping.get("excludes", []))
             mode_name = "Full" if args.full else "Safe"
             
             print(f"\n{Colors.HEADER}[{server_alias}] {mode_name}: {local} -> {host}:{remote}{Colors.ENDC}")
@@ -388,13 +404,16 @@ def main():
         print(f"{Colors.GREEN}Configuration saved!{Colors.ENDC}")
 
     # 4. Execute Actions
+    general_excludes = config.get("general_excludes", [])
+    effective_excludes = [] if args.no_excludes else merge_excludes(general_excludes, active_mapping.get("excludes", []))
+
     # Sync first if requested
     if args.safe or args.full:
         run_rsync(
             host, 
             active_mapping["local"], 
             active_mapping["remote"], 
-            active_mapping["excludes"],
+            effective_excludes,
             full_sync=args.full,
             auto_accept=args.auto_accept
         )
@@ -405,8 +424,8 @@ def main():
             host=host,
             local_path=active_mapping["local"],
             remote_path=active_mapping["remote"],
-            excludes=active_mapping.get("excludes", []),
-            artifact_excludes=active_mapping.get("artifact_excludes", []),
+            excludes=effective_excludes,
+            artifact_excludes=[] if args.no_excludes else active_mapping.get("artifact_excludes", []),
             auto_accept=args.auto_accept
         )
     

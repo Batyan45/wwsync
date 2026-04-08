@@ -12,6 +12,7 @@ A simple, interactive wrapper around `rsync` designed for developers who code lo
 - **Auto Accept (`--auto_accept`):** Skips all confirmations in `--full` and `--all` modes.
 - **Remote Run (`-r`):** Automatically SSH into the server, cd to the project folder, and optionally execute a startup command (e.g. `conda activate`).
 - **Exclusions:** Easy management of ignored files (`node_modules`, `.git`, `.env`).
+- **General Excludes:** Define exclusion patterns once in `general_excludes` — they apply to **all mappings on all servers** automatically.
 - **Artifacts Download (`-d` / `--download`):** Downloads only **new remote files** into `.wwsync_<server>_artifacts` inside your project. Changed files are listed as warning and are not downloaded.
 
 ## Installation
@@ -114,6 +115,7 @@ The configuration is stored in `~/.wwsync` in JSON format. You can edit it manua
 
 ```json
 {
+    "general_excludes": [".git", ".DS_Store", "__pycache__"],
     "servers": {
         "production": {
             "host": "root@192.168.1.50",
@@ -122,8 +124,8 @@ The configuration is stored in `~/.wwsync` in JSON format. You can edit it manua
                 {
                     "local": "/Users/dev/my-project",
                     "remote": "/var/www/html/api",
-                    "excludes": [".git", "node_modules", ".env"],
-                    "artifact_excludes": ["*.tmp", "*.cache", ".DS_Store"],
+                    "excludes": ["node_modules", ".env"],
+                    "artifact_excludes": ["*.tmp", "*.cache"],
                     "run_command": "source .env; conda activate myenv"
                 }
             ]
@@ -131,6 +133,9 @@ The configuration is stored in `~/.wwsync` in JSON format. You can edit it manua
     }
 }
 ```
+
+- **`general_excludes`** — patterns listed here are merged with every mapping's `excludes` on every server. Duplicates are removed automatically. This is useful for patterns like `.git`, `.DS_Store`, `__pycache__` that you always want to exclude.
+- **`excludes`** (per mapping) — additional patterns specific to a particular folder.
 
 ## Requirements
 
